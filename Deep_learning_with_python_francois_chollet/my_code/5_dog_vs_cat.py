@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from keras import layers
 from keras import models
 from keras import optimizers
+import numpy as np
 
 
 #结构
@@ -16,6 +17,7 @@ from keras import optimizers
     #4.1：对于提取特征，我们一般使用的是训练好的一系列池化层和卷积层（卷积基），原因是卷积基学习的表示更加通用，因此更适合重复使用
         #表示通用性取决于该层在模型的深度，一般靠近底部的层提取是局部的，高度通用的特征图（比如视觉边缘、颜色、纹理），而对于顶部
         #的层一般是提取更多的抽象的盖帘，因此如果新数据与原始训练的数据集有很大差异，那么最好只使用前基层来做特征 提取，而不是整个卷积基
+    #4.2微调模型，指对顶层进行解冻，将解冻和新增加的部分进行联合训练，称为微调
 
 
 
@@ -227,12 +229,165 @@ def stronger_model(file_data):
     model.save('cats_and_dogs_small_2.h5')
 
 
+#4.VGG16的设置,没有使用增强的特征
+def VGG16_model(file_data):
 
-def VGG16_model():
     from keras.applications import VGG16
-    conv_base = VGG16(weights='imagenet',
-                      include_top =False,#是否适用密集连接分类器，默认对应ImageNet的1000类别，我们使用自己的只有2类
-                      input_shape=(150,150,3))
+    path_model = 'vgg16_model'
+
+
+    if not os.path.exists(path_model):
+        path_history = open('vgg16_history', 'wb')
+        #卷积基部分及去掉密连接的设置
+        conv_base = VGG16(weights='imagenet',
+                          include_top =False,#是否适用密集连接分类器，默认对应ImageNet的1000类别，我们使用自己的只有2类
+                          input_shape=(150,150,3))
+
+        datagen = ImageDataGenerator(rescale=1./255)
+        batch_size=20
+        def extract_feature(directory,sample_count):
+            features = np.zeros(shape=(sample_count,4,4,512))#结构取决于VGG16的层设置
+            labels = np.zeros(shape=(sample_count))
+            generator = datagen.flow_from_directory(
+                directory,
+                target_size=(150,150),
+                batch_size=batch_size,
+                class_mode='binary'
+            )
+            i = 0
+            for input_batch,labels_batch in generator:
+                features_batch = conv_base.predict(input_batch)
+                features[i*batch_size:(i+1)*batch_size] = features_batch
+                labels[i*batch_size:(i+1)*batch_size] = labels_batch
+                i+=1
+                if i*batch_size>=sample_count:
+                    break
+            return features,labels
+
+        train_feature,train_labels = extract_feature(file_data.train_dir,2000)
+        validation_feature,validation_labels = extract_feature(file_data.validation_dir,1000)
+        # test_feature,test_labels = extract_feature(file_data.test_dir,1000)
+
+        train_feature = np.reshape(train_feature,(2000,4*4*512))
+        validation_feature = np.reshape(validation_feature, (1000, 4 * 4 * 512))
+        # test_feature = np.reshape(test_feature, (1000 * 4 * 4 * 512))
+
+        #卷积部分
+        model = models.Sequential()
+        model.add(layers.Dense(256,activation='relu',input_dim = 4*4*512))
+        model.add(layers.Dropout(0.5))
+        model.add(layers.Dense(1,activation='sigmoid'))
+
+        model.compile(optimizer=optimizers.RMSprop(lr=2e-5),
+                      loss='binary_crossentropy',
+                      metrics=['acc'])
+        history = model.fit(train_feature,train_labels,
+                            epochs=20,
+                            batch_size=20,
+                            validation_data=(validation_feature,validation_labels))
+        model.save(path_model)
+        pickle.dump(history,path_history)
+        path_history.close()
+    else:
+        path_history = open('vgg16_history', 'rb')
+        model = models.load_model(path_model)
+        history = pickle.load(path_history)
+        path_history.close()
+    return model, history
+
+    #如果需要使用数据增强，则可以调模型为下面的
+    model  = models.Sequential()
+    model.add(conv_base)
+    model.add(layers.Flatten())
+    model.add(layers.Dense(256,activation='relu'))
+    model.add(layers.Dense(1,activation='sigmoid'))
+
+    conv_base.trainable=False#注意要冻结已经训练好的模型
+
+
+#微调模型   1.训练好的基网络定义网络   2.冻结基网络 3.训练添加部分    4.解冻部分层     5.联合训练解冻部分和添加部分
+def smallchange_VGG16(file_data):
+    from keras.applications import VGG16
+    path_model = 'vgg16_model_smallchange'
+
+    if not os.path.exists(path_model):
+        path_history = open('vgg16_history_smallchange', 'wb')
+        # 卷积基部分及去掉密连接的设置
+        conv_base = VGG16(weights='imagenet',
+                          include_top=False,  # 是否适用密集连接分类器，默认对应ImageNet的1000类别，我们使用自己的只有2类
+                          input_shape=(150, 150, 3))
+
+        datagen = ImageDataGenerator(rescale=1. / 255)
+        batch_size = 20
+
+        def extract_feature(directory, sample_count):
+            features = np.zeros(shape=(sample_count, 4, 4, 512))  # 结构取决于VGG16的层设置
+            labels = np.zeros(shape=(sample_count))
+            generator = datagen.flow_from_directory(
+                directory,
+                target_size=(150, 150),
+                batch_size=batch_size,
+                class_mode='binary'
+            )
+            i = 0
+            for input_batch, labels_batch in generator:
+                features_batch = conv_base.predict(input_batch)
+                features[i * batch_size:(i + 1) * batch_size] = features_batch
+                labels[i * batch_size:(i + 1) * batch_size] = labels_batch
+                i += 1
+                if i * batch_size >= sample_count:
+                    break
+            return features, labels
+
+        conv_base.trainable=True
+        set_trainable = False
+        for layer in conv_base.layers:
+            if layer.name =='block5_conv1':
+                set_trainable=True
+            if set_trainable:
+                layer.trainable=True
+            else:
+                layer.trainable=False
+
+
+
+        train_feature, train_labels = extract_feature(file_data.train_dir, 2000)
+        validation_feature, validation_labels = extract_feature(file_data.validation_dir, 1000)
+        # test_feature,test_labels = extract_feature(file_data.test_dir,1000)
+
+        train_feature = np.reshape(train_feature, (2000, 4 * 4 * 512))
+        validation_feature = np.reshape(validation_feature, (1000, 4 * 4 * 512))
+        # test_feature = np.reshape(test_feature, (1000 * 4 * 4 * 512))
+
+        # 卷积部分
+        model = models.Sequential()
+        model.add(layers.Dense(256, activation='relu', input_dim=4 * 4 * 512))
+        model.add(layers.Dropout(0.5))
+        model.add(layers.Dense(1, activation='sigmoid'))
+
+        model.compile(optimizer=optimizers.RMSprop(lr=2e-5),
+                      loss='binary_crossentropy',
+                      metrics=['acc'])
+        history = model.fit(train_feature, train_labels,
+                            epochs=20,
+                            batch_size=20,
+                            validation_data=(validation_feature, validation_labels))
+        model.save(path_model)
+        pickle.dump(history, path_history)
+        path_history.close()
+    else:
+        path_history = open('vgg16_history_smallchange', 'rb')
+        model = models.load_model(path_model)
+        history = pickle.load(path_history)
+        path_history.close()
+    return model, history
+
+
+
+
+
+
+
 
 
 #绘制损失函数图形
@@ -250,13 +405,19 @@ def plot_loss(history):
 
     plt.show()
 
+
+
+
 def main():
     file_data = path_and_data()
     file_data.copy_excate_file()
 
-    stronger_model(file_data)
+    # stronger_model(file_data)
+
+    # models,history = VGG16_model(file_data)
+    models,history = smallchange_VGG16(file_data)
     # model,history = network_model(file_data)
-    # plot_loss(history)
+    plot_loss(history)
 
 
 
