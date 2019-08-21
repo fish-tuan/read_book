@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>StudentList</title>
+</head>
+<body>
+
+<h2>Ubuntu</h2>
+
+<h3>{{ hobby }}</h3>
+
+<hr>
+<ul>
+    {% for student in students %}
+        <li>{{student.s_name}}</li>
+    {% endfor%}
+</ul>
+
+
+
+</body>
+</html>
